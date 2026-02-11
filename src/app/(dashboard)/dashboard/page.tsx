@@ -1,12 +1,16 @@
-
 import { InputEngine } from "@/components/input-engine"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Target, TrendingUp, Activity, ArrowRight, Gauge, Scale } from "lucide-react"
+import type { Database } from "@/lib/database.types"
 import { createClient } from "@/lib/supabase/server"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 import { format } from "date-fns"
 import { cn } from "@/lib/utils"
+
+type ProtocolRow = Database["public"]["Tables"]["protocols"]["Row"]
+type DailyInputRow = Database["public"]["Tables"]["daily_inputs"]["Row"]
+type DailyLedgerRow = Database["public"]["Tables"]["daily_ledger"]["Row"]
 
 export default async function DashboardPage() {
     const cookieStore = await cookies()
@@ -16,34 +20,43 @@ export default async function DashboardPage() {
     if (!user) redirect("/login")
 
     // Check Active Protocol for Goals
-    const { data: protocol } = await supabase
+    const { data } = await supabase
         .from("protocols")
         .select("*")
         .eq("user_id", user.id)
         .eq("status", "ACTIVE")
-        .single()
+        .maybeSingle()
 
-    // If no protocol or no valid goal set, force settings onboarding
-    if (!protocol || (!protocol.goal_weight_kg && !protocol.goal_bodyfat_pct)) {
+    const protocol = data as ProtocolRow | null
+
+    // If no protocol active, redirect to onboarding
+    if (!protocol) {
+        redirect("/settings?onboarding=true")
+    }
+
+    // If no valid goals set, force settings
+    if (!protocol.goal_weight_kg && !protocol.goal_bodyfat_pct) {
         redirect("/settings?onboarding=true")
     }
 
     // Fetch Latest Input to show progress
-    const { data: latestInput } = await supabase
+    const { data: latestInputData } = await supabase
         .from("daily_inputs")
         .select("*")
         .eq("user_id", user.id)
         .order("date", { ascending: false })
         .limit(1)
         .maybeSingle()
+    const latestInput = latestInputData as DailyInputRow | null
 
     // Fetch Latest Score for the Dashboard header
-    const { data: latestLedger } = await supabase
+    const { data: latestLedgerData } = await supabase
         .from("daily_ledger")
         .select("*")
         .order("date", { ascending: false })
         .limit(1)
         .maybeSingle()
+    const latestLedger = latestLedgerData as DailyLedgerRow | null
 
     // Progress Calculations
     const currentWeight = latestInput?.weight_kg || protocol.initial_weight_kg || 0

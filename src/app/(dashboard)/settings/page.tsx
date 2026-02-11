@@ -1,7 +1,10 @@
+import type { Database } from "@/lib/database.types"
 import { createClient } from "@/lib/supabase/server"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 import { SettingsForm } from "@/components/settings-form"
+
+type ProtocolRow = Database["public"]["Tables"]["protocols"]["Row"]
 
 export default async function SettingsPage() {
     const cookieStore = await cookies()
@@ -11,12 +14,14 @@ export default async function SettingsPage() {
     if (!user) redirect("/login")
 
     // Fetch Active Protocol
-    const { data: protocol } = await supabase
+    const { data } = await supabase
         .from("protocols")
         .select("*")
         .eq("user_id", user.id)
         .eq("status", "ACTIVE")
         .single()
+
+    const protocol = data as ProtocolRow | null
 
     return (
         <div className="space-y-6">

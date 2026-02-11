@@ -1,9 +1,15 @@
+import type { Database } from "@/lib/database.types"
 import { createClient } from "@/lib/supabase/server"
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 import { format } from "date-fns"
 import { TrendingDown, TrendingUp, Minus } from "lucide-react"
 import { cn } from "@/lib/utils"
+
+type DailyLedgerRow = Database["public"]["Tables"]["daily_ledger"]["Row"]
+type HistoryEntry = DailyLedgerRow & {
+    daily_inputs: { weight_kg: number | null; calories_consumed: number | null; protein_consumed: number | null } | null
+}
 
 export default async function HistoryPage() {
     const cookieStore = await cookies()
@@ -13,7 +19,7 @@ export default async function HistoryPage() {
     if (!user) redirect("/login")
 
     // Fetch ledger entries with input data
-    const { data: history, error } = await supabase
+    const { data: historyData, error } = await supabase
         .from("daily_ledger")
         .select(`
             *,
@@ -24,6 +30,8 @@ export default async function HistoryPage() {
             )
         `)
         .order("date", { ascending: false })
+
+    const history = historyData as HistoryEntry[] | null
 
     if (error) {
         console.error("History fetch error:", error)
@@ -59,7 +67,7 @@ export default async function HistoryPage() {
                                         <td className="px-6 py-4">
                                             <div className="flex items-center gap-2">
                                                 <span className="text-slate-200">
-                                                    {(entry.daily_inputs as any)?.weight_kg || '—'}
+                                                    {entry.daily_inputs?.weight_kg ?? '—'}
                                                     <span className="text-xs text-slate-500 ml-1">kg</span>
                                                 </span>
                                             </div>
@@ -100,7 +108,7 @@ export default async function HistoryPage() {
                                                             (entry.execution_score || 0) >= 75 ? 'bg-indigo-500' :
                                                                 (entry.execution_score || 0) >= 60 ? 'bg-yellow-500' : 'bg-red-500'
                                                             }`}
-                                                        style={{ width: `${entry.execution_score}%` }}
+                                                        style={{ width: `${entry.execution_score ?? 0}%` }}
                                                     />
                                                 </div>
                                                 <span className="font-bold text-white font-mono w-8">{entry.execution_score}</span>

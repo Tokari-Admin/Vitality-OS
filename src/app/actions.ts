@@ -1,9 +1,15 @@
 "use server"
 
 import { createClient } from "@/lib/supabase/server"
-import { Database } from "@/lib/database.types"
+import type { Database } from "@/lib/database.types"
 import { cookies } from "next/headers"
 import { revalidatePath } from "next/cache"
+
+type DailyInputInsert = Database["public"]["Tables"]["daily_inputs"]["Insert"]
+type ProtocolInsert = Database["public"]["Tables"]["protocols"]["Insert"]
+type WeeklyTargetInsert = Database["public"]["Tables"]["weekly_targets"]["Insert"]
+type DailyLedgerInsert = Database["public"]["Tables"]["daily_ledger"]["Insert"]
+type ProtocolUpdate = Database["public"]["Tables"]["protocols"]["Update"]
 
 type DailyLogData = {
     date: string
@@ -27,51 +33,56 @@ export async function logDailyMetrics(data: DailyLogData) {
 
     try {
         // 1. Upsert Input
+        const inputPayload: DailyInputInsert = {
+            user_id: user.id,
+            date: data.date,
+            weight_kg: data.weight,
+            body_fat_pct: data.body_fat_pct ?? null,
+            calories_consumed: data.calories,
+            protein_consumed: data.protein,
+            hydration_liters: data.hydration_liters,
+            active_calories_burned: data.sports_calories_burned,
+            training_completed: data.training,
+            is_sleep_adequate: data.sleep,
+            sleep_quality_score: data.sleep ? 4 : 2
+        }
         const { data: inputData, error: inputError } = await supabase
             .from("daily_inputs")
-            .upsert({
-                user_id: user.id,
-                date: data.date,
-                weight_kg: data.weight,
-                body_fat_pct: data.body_fat_pct ?? null,
-                calories_consumed: data.calories,
-                protein_consumed: data.protein,
-                hydration_liters: data.hydration_liters,
-                active_calories_burned: data.sports_calories_burned,
-                training_completed: data.training,
-                is_sleep_adequate: data.sleep,
-                sleep_quality_score: data.sleep ? 4 : 2
-            }, { onConflict: "user_id, date" })
+            .upsert(inputPayload as never, { onConflict: "user_id, date" })
             .select()
             .single()
 
         if (inputError) throw inputError
 
         // 2. Find/Create Protocol
-        let { data: protocol } = await supabase
+        type ProtocolIdRow = { id: string }
+        let { data: protocolData } = await supabase
             .from("protocols")
             .select("id")
             .eq("user_id", user.id)
             .eq("status", "ACTIVE")
             .single()
+        let protocol = protocolData as ProtocolIdRow | null
 
         if (!protocol) {
             // Auto-create default if missing
-            const { data: newProtocol } = await supabase
+            const protocolPayload: ProtocolInsert = {
+                user_id: user.id,
+                status: "ACTIVE",
+                goal_type: "FAT_LOSS",
+                start_date: new Date().toISOString().split("T")[0],
+                initial_weight_kg: data.weight,
+            }
+            const { data: newProtocolData } = await supabase
                 .from("protocols")
-                .insert({
-                    user_id: user.id,
-                    status: "ACTIVE",
-                    goal_type: "FAT_LOSS",
-                    start_date: new Date().toISOString().split("T")[0],
-                    initial_weight_kg: data.weight,
-                })
+                .insert(protocolPayload as never)
                 .select()
                 .single()
+            const newProtocol = newProtocolData as ProtocolIdRow | null
             protocol = newProtocol
 
             if (protocol) {
-                await supabase.from("weekly_targets").insert({
+                const targetPayload: WeeklyTargetInsert = {
                     protocol_id: protocol.id,
                     week_number: 1,
                     start_date: new Date().toISOString().split("T")[0],
@@ -80,30 +91,30 @@ export async function logDailyMetrics(data: DailyLogData) {
                     daily_protein_target: 180,
                     hydration_target_l: 3.5,
                     daily_steps_target: 10000
-                })
+                }
+                await supabase.from("weekly_targets").insert(targetPayload as never)
             }
         }
 
-        // 3. Get Targets
-        const { data: target } = await supabase
+        type WeeklyTargetRow = Database["public"]["Tables"]["weekly_targets"]["Row"]
+        const { data: targetData } = await supabase
             .from("weekly_targets")
             .select("*")
             .eq("protocol_id", protocol?.id || "")
             .gte("end_date", data.date)
             .lte("start_date", data.date)
             .maybeSingle()
+        let currentTarget = targetData as WeeklyTargetRow | null
 
-        // Fallback target logic
-        let currentTarget = target
         if (!currentTarget && protocol) {
-            const { data: latestTarget } = await supabase
-                .from('weekly_targets')
-                .select('*')
-                .eq('protocol_id', protocol.id)
-                .order('week_number', { ascending: false })
+            const { data: latestTargetData } = await supabase
+                .from("weekly_targets")
+                .select("*")
+                .eq("protocol_id", protocol.id)
+                .order("week_number", { ascending: false })
                 .limit(1)
                 .single()
-            currentTarget = latestTarget
+            currentTarget = latestTargetData as WeeklyTargetRow | null
         }
 
         const T_CALORIES = currentTarget?.daily_calories_target || 2000
@@ -146,8 +157,10 @@ export async function logDailyMetrics(data: DailyLogData) {
             deficitAttainment = 100
         }
 
-        const { error: ledgerError } = await supabase.from("daily_ledger").upsert({
-            input_id: inputData.id,
+        type DailyInputRow = Database["public"]["Tables"]["daily_inputs"]["Row"]
+        const inputRow = inputData as DailyInputRow
+        const ledgerPayload: DailyLedgerInsert = {
+            input_id: inputRow.id,
             date: data.date,
             target_calories: T_CALORIES,
             target_protein: T_PROTEIN,
@@ -155,8 +168,9 @@ export async function logDailyMetrics(data: DailyLogData) {
             net_deficit: netDeficit,
             deficit_adherence_pct: deficitAttainment,
             execution_score: totalScore,
-            execution_label: label as any
-        }, { onConflict: "input_id" })
+            execution_label: label as DailyLedgerInsert["execution_label"]
+        }
+        const { error: ledgerError } = await supabase.from("daily_ledger").upsert(ledgerPayload as never, { onConflict: "input_id" })
 
         if (ledgerError) throw ledgerError
 
@@ -198,42 +212,43 @@ export async function updateProtocol(data: {
     if (!user) return { success: false, message: "Unauthorized" }
 
     try {
-        // Check for active protocol
-        let { data: protocol } = await supabase
+        type ProtocolIdRow = { id: string }
+        const { data: protocolData } = await supabase
             .from("protocols")
             .select("id")
             .eq("user_id", user.id)
             .eq("status", "ACTIVE")
             .single()
+        const protocol = protocolData as ProtocolIdRow | null
 
         if (protocol) {
-            // Update existing
+            const updatePayload: ProtocolUpdate = {
+                goal_type: data.goal_type as ProtocolUpdate["goal_type"],
+                goal_weight_kg: data.goal_weight_kg,
+                goal_bodyfat_pct: data.goal_bodyfat_pct,
+                initial_weight_kg: data.initial_weight_kg,
+                initial_bodyfat_pct: data.initial_bodyfat_pct,
+            }
             const { error } = await supabase
                 .from("protocols")
-                .update({
-                    goal_type: data.goal_type as any,
-                    goal_weight_kg: data.goal_weight_kg,
-                    goal_bodyfat_pct: data.goal_bodyfat_pct,
-                    initial_weight_kg: data.initial_weight_kg,
-                    initial_bodyfat_pct: data.initial_bodyfat_pct,
-                })
+                .update(updatePayload as never)
                 .eq("id", protocol.id)
 
             if (error) throw error
         } else {
-            // Create new
+            const insertPayload: ProtocolInsert = {
+                user_id: user.id,
+                status: "ACTIVE",
+                goal_type: data.goal_type as ProtocolInsert["goal_type"],
+                goal_weight_kg: data.goal_weight_kg,
+                goal_bodyfat_pct: data.goal_bodyfat_pct,
+                initial_weight_kg: data.initial_weight_kg,
+                initial_bodyfat_pct: data.initial_bodyfat_pct,
+                start_date: new Date().toISOString().split("T")[0]
+            }
             const { error } = await supabase
                 .from("protocols")
-                .insert({
-                    user_id: user.id,
-                    status: "ACTIVE",
-                    goal_type: data.goal_type as any,
-                    goal_weight_kg: data.goal_weight_kg,
-                    goal_bodyfat_pct: data.goal_bodyfat_pct,
-                    initial_weight_kg: data.initial_weight_kg,
-                    initial_bodyfat_pct: data.initial_bodyfat_pct,
-                    start_date: new Date().toISOString().split("T")[0]
-                })
+                .insert(insertPayload as never)
 
             if (error) throw error
         }
